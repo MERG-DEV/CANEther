@@ -38,7 +38,7 @@
 #include <TCPIP Stack/Tick.h>
 
 #include "project.h"
-#include "cbusdefs8j.h"
+#include "cbusdefs8r.h"
 #include "rocrail.h"
 
 

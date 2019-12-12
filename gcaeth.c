@@ -29,7 +29,7 @@
 #include "utils.h"
 #include "io.h"
 #include "cangc1e.h"
-#include "cbusdefs8j.h"
+#include "cbusdefs8r.h"
 #include "TCPIP Stack/Announce.h"
 
 

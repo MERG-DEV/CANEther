@@ -28,7 +28,7 @@
 #include "project.h"
 #include "canbus.h"
 #include "utils.h"
-#include "cbusdefs8h.h"
+#include "cbusdefs8r.h"
 #include "cangc1e.h"
 #include "io.h"
 

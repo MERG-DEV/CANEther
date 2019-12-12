@@ -24,7 +24,7 @@
 #include <TCPIP Stack/TCPIP.h>
 
 #include "project.h"
-#include "cbusdefs8j.h"
+#include "cbusdefs8r.h"
 #include "canbus.h"
 #include "rocrail.h"
 #include "utils.h"
