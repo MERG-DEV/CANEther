@@ -35,18 +35,32 @@
 void setupIO(void) {
   int idx = 0;
 
+  // Enable watchdog timer
+  WDTCON = 1;  
+  
+  // Enable brown out reset
+  RCONbits.SBOREN = 1; // Enable brown out reset
+  
   // all digital I/O
   ADCON0 = 0x00;
   ADCON1 = 0x0F;
 
-  TRISCbits.TRISC0 = 0; /* LED1 */
-  TRISCbits.TRISC1 = 0; /* LED2 */
-  TRISCbits.TRISC2 = 0; /* LED3 */
-  TRISAbits.TRISA0 = 1; /* SW */
-  TRISCbits.TRISC6 = 1; /* JP2 */
-
-  TRISBbits.TRISB6 = 0; /* Yellow FLiM LED */
-  TRISBbits.TRISB7 = 0; /* Green SLiM LED */
+  // Set all I/O as outputs so any unused pins remain as outputs
+  TRISA = 0;
+  TRISB = 0;
+  TRISC = 0;   
+  
+  // Set pin usage
+  
+  LED1_TRIS = 0;    /* LED1 */ 
+  LED2_TRIS = 0;    /* LED2 */
+  LED3_TRIS = 0;    /* LED3 */
+  
+  SW_TRIS = 1;       /* SW - FLiM switch */
+  JP2_TRIS = 1;      /* JP2 - option jumper */
+  
+  SLIM_LEDG_TRIS = 0; /* Yellow FLiM LED */
+  FLIM_LEDY_TRIS = 0; /* Green SLiM LED */
 
   // Enable internal pull-ups.
   INTCON2bits.RBPU = 0;

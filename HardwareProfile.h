@@ -81,7 +81,7 @@
 #define MAC_CS_TRIS             (TRISCbits.RC7)
 #define MAC_CS_IO               (LATCbits.LATC7)
 
-// MAC Chip insructions
+// MAC Chip instructions
 
 #define MAC_READ                0x03        // Send read command followed by address then clock the data into the PIC
 #define MAC_WRITE               0x02        // send write command follwed by address followed by data (WREN must be done first) then CS high to write

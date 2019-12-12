@@ -29,12 +29,13 @@
 #include <TCPIP Stack/TCPIP.h>
 
 
-void setMacAddress( void );
+void setMacAddress( BOOL resetDefaults );
 BOOL readUnioMac(void);
 BOOL readSpiMac(void);
 
-void InitAppConfig(void);
-void initEth(void);
+void InitAppConfig(BOOL resetDefaults);
+void setDHCPMode( BOOL toggleDHCP );
+void initEth(BOOL resetDefaults, BOOL toggleDHCP);
 void doEth(void);
 
 

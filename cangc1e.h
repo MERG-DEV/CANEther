@@ -54,7 +54,7 @@
 #define MINOR_VER 'e'	// Minor version character
 #define MODULE_FLAGS    0b00001100  // Neither Producer or consumer, but can boot and is in FLiM mode
 #define BUS_TYPE        PB_CAN      // Primarily a CAN device
-#define BETA            13            
+#define BETA            14            
 
 #define EVT_NUM 0
 #define EVperEVT 0
@@ -82,12 +82,6 @@
 #define EE_REMOTEPORT EE_PORTNUM + 2    // 2 bytes remote bridge port number
 #define EE_REMOTEIP EE_REMOTEPORT + 2   // 4 bytes remote bridge IP address
 #define EE_GATEWAY EE_REMOTEIP + 4      // 4 bytes remote bridge gateway
-
-
-
-
-
-
 
 
 // values

@@ -24,6 +24,9 @@
 #ifndef __IO_H
 #define __IO_H
 
+#define LED1_TRIS             (TRISCbits.TRISC2)
+#define LED2_TRIS             (TRISCbits.TRISC0)
+#define LED3_TRIS             (TRISCbits.TRISC1)
 
 #define LED1    PORTCbits.RC2   // cbus activity
 #define LED2    PORTCbits.RC0   // ethernet activity
@@ -31,16 +34,22 @@
 
 #ifdef CANEtherT
     #define SW      PORTAbits.RA2   // FLiM button on PNB -T variant is on standard of RA2
+    #define SW_TRIS (TRISAbits.TRISA2)
 #else
     #define SW      PORTAbits.RA0   // FLiM button
+    #define SW_TRIS (TRISAbits.TRISA0)
 #endif
 
 
 #define JP2     PORTCbits.RC6   // option jumper 2
+#define JP2_TRIS (TRISCbits.TRISC6)
+
 
 #define SLIM_LEDG   PORTBbits.RB7   // Green SLiM LED (CANEther only)
 #define FLIM_LEDY   PORTBbits.RB6   // Yellow FLiM LED (CANEther only)
 
+#define SLIM_LEDG_TRIS  (TRISBbits.TRISB7)
+#define FLIM_LEDY_TRIS  (TRISBbits.TRISB6)
 
 void setupIO(void);
 void writeOutput(int port, unsigned char val);

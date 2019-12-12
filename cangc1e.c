@@ -22,9 +22,9 @@
  
  Version 2e	- 3/2/13
  
- Following changes:
+ Following changes (c) Pete Brownlow 2013:
 
- 		- Use latest CBUS definiitions
+ 		- Use latest CBUS definitions
 		- Define CBUS parameter block as per current spec
 		- User vectors defined at 0x800 upwards
 		- Add debounce counter for pushbutton
@@ -60,12 +60,14 @@
 #endif
 
 #pragma config FCMEN=OFF, IESO=OFF
-#pragma config PWRT=ON, BOREN=BOHW, BORV=2, WDT = OFF, WDTPS=256
+#pragma config PWRT=ON, BOREN=SBORENCTRL, BORV=2, WDT = OFF, WDTPS=1024 // Brown out enable under s/w control, power up timer on, Watchdog under software control, watchdog scaler 1024 gives 4 seconds
 #pragma config MCLRE=ON, LPT1OSC=OFF, PBADEN=OFF, DEBUG=OFF
 #pragma config XINST=OFF, BBSIZ=1024, LVP=OFF, STVREN=ON
 #pragma config CP0=OFF, CP1=OFF, CPB=OFF, CPD=OFF
 #pragma config WRT0=OFF, WRT1=OFF, WRTB=OFF, WRTC=OFF, WRTD=OFF
 #pragma config EBTR0=OFF, EBTR1=OFF, EBTRB=OFF
+
+
 
 
 unsigned short NN_temp;
@@ -134,6 +136,9 @@ void main(void) {
   unsigned char swTrig = 0;
   BYTE  debounce_count = 0;
   BYTE  i;
+  BOOL  FLiMPressed;    // Set true when powered on with FLiM button down
+  BOOL  resetDefaults;  // Set true when powered on with button down and JP2 in
+  BOOL  toggleDHCP;     // Set true when powered on with button down and JP2 out
 
   aliveCounter = 0;
   Wait4NN = FALSE;
@@ -146,7 +151,8 @@ void main(void) {
   doEthTick = FALSE;
 
   lDelay();
-
+  ClrWdt();
+  
   NV1 = eeRead(EE_NV);
   if (NV1 == 0xFF) {
     eeWrite(EE_NV, 0);  // Default for NV1 is all flags off
@@ -154,15 +160,29 @@ void main(void) {
     IdleTime = 120; // 120 * 500ms = 60 sec.
     eeWrite(EE_IDLETIME, IdleTime);
   }
-
+  
   setupIO();
   
-  setMacAddress();  
+  if (FLiMPressed = checkFlimSwitch())
+  {
+      lDelay(); // debounce
+      FLiMPressed = checkFlimSwitch();
+      ClrWdt();
+              
+  }
+  
+  resetDefaults = FLiMPressed && !JP2;
+  
+          
+  setMacAddress( resetDefaults );  
 
   initIO();
 
-  initEth();
+  initEth( resetDefaults, toggleDHCP );
 
+  while (checkFlimSwitch())
+      ClrWdt();    // Wait for button release before proceeding
+  
   NN_temp = eeRead(EE_NN+1) * 256;
   NN_temp += eeRead(EE_NN);
   if (NN_temp == 0 || NN_temp == 0xFFFF || NN_temp == DEFAULT_NN) {
@@ -200,6 +220,7 @@ void main(void) {
 #ifdef WITHCAN
     while (canbusRecv(&cmsg)) 
     {
+      ClrWdt();
       if (parseCmdEth(&cmsg, 0)) {
         if (CBusEthBroadcast(&cmsg, 0xFE)) {
           rsend = TRUE;

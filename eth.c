@@ -33,13 +33,11 @@
 
 // Read in MAC address from MAC chip if fitted
 
-void setMacAddress( void )
+void setMacAddress( BOOL resetDefaults )
 
-{
-    if (checkFlimSwitch())
-        lDelay();   // For startup debounce on push button
+// If unitialised, or powered on with JP2 in and button pressed, then reset MAC and IP to defaults
 
-    if (checkFlimSwitch() || (eeRead(EE_MACADDR) == 0xFF))  // Flag for virgin state, or powered up with button held in
+{   if ( resetDefaults || (eeRead(EE_MACADDR) == 0xFF))  // Flag for virgin state, or powered up with button held in and JP2 in
     {                                                        // (First byte of valid MAC address cannot be 0xFF)
     
         // Call routines to try and read MAC address from one of two types of chip, if fitted.
@@ -156,7 +154,7 @@ BOOL readSpiMac(void)
  */
 APP_CONFIG AppConfig;
 
-void initEth(void) {
+void initEth(BOOL resetDefaults, BOOL toggleDHCP) {
   /*
    * Initialize all stack related components.
    * Following steps must be performed for all applications using
@@ -171,14 +169,16 @@ void initEth(void) {
   /*
    * Initialize Stack and application related NV variables.
    */
-  InitAppConfig();
+  InitAppConfig(resetDefaults);
+  
+  setDHCPMode( toggleDHCP );
 
   StackInit();
 
   CBusEthInit();
 }
 
-void InitAppConfig(void)
+void InitAppConfig(BOOL resetDefaults)
 {
 
   BYTE slen;
@@ -186,7 +186,7 @@ void InitAppConfig(void)
   unsigned char defaultHostName[] = MY_DEFAULT_HOST_NAME;
 
 
-  if (checkFlimSwitch() || (eeRead(EE_CLEAN) == 0xFF))
+  if (resetDefaults || (eeRead(EE_CLEAN) == 0xFF))
   {
     eeWrite(EE_CLEAN, 0);
     eeWrite(EE_IPADDR + 0, MY_DEFAULT_IP_ADDR_BYTE1);
@@ -200,7 +200,7 @@ void InitAppConfig(void)
     eeWrite(EE_NETMASK + 3, MY_DEFAULT_MASK_BYTE4);
   }
 
-  if (checkFlimSwitch() || (eeReadShort(EE_PORTNUM) == 0xFFFF))   // Check this separately in case upgrading from firmware that does not have these NVs, when they will be set to FF
+  if (resetDefaults || (eeReadShort(EE_PORTNUM) == 0xFFFF))   // Check this separately in case upgrading from firmware that does not have these NVs, when they will be set to FF
   {
     eeWriteShort(EE_PORTNUM, DEFAULT_CBUSETH_PORT );
     eeWriteShort(EE_REMOTEPORT, DEFAULT_CBUSETH_PORT);
@@ -252,11 +252,15 @@ void InitAppConfig(void)
 
   strcpy( AppConfig.NetBIOSName , defaultHostName );
 
+}
 
+void setDHCPMode( BOOL toggleDHCP )
+{
 #if defined(STACK_USE_DHCP_CLIENT) || defined(STACK_USE_IP_GLEANING)
   // Make DHCP setting toggle by powering up with pushbutton held down
   // and make the setting stick by saving NV1 to EEPROM - PNB 1/1/13
-  if (checkFlimSwitch()) {
+  if (toggleDHCP) 
+  {
     NV1 ^= CFG_DHCP_CLIENT; // Toggle DHCP flag;  
     eeWrite(EE_NV, NV1);
   }

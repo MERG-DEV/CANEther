@@ -42,6 +42,7 @@ unsigned char eeRead(unsigned char addr) {
  */
 void eeWrite(unsigned char addr, unsigned char data) {
 
+  
   INTCONbits.GIE = 0; // Disable interupts
 
   EECON1bits.EEPGD = 0; // Select the EEPROM memory
@@ -51,11 +52,18 @@ void eeWrite(unsigned char addr, unsigned char data) {
   EEDATA = data; // Set the data
   EECON2 = 0x55; // Write initiate sequence
   EECON2 = 0xaa; // Write initiate sequence
+  WDTCON =0;            // Disable watchdog reset during EEPROM write
+  RCONbits.SBOREN = 0;  // Disable brown out reset during EEPROM write
   EECON1bits.WR = 1; // Start writing
+  
   while (!PIR2bits.EEIF)
     ; // Wait for write to finish
   PIR2bits.EEIF = 0; // Clear EEIF bit
-
+  
+  EECON1bits.WREN = 0;  // Disable writing
+  
+  RCONbits.SBOREN = 1;   // Re-enable brown out reset
+  WDTCON = 1;          // Re-enable watchdog
   INTCONbits.GIE = 1; // Enable interupts
 }
 
