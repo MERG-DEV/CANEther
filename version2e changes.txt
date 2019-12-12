@@ -1,0 +1,106 @@
+
+Changes to CANGC1e firmware for version 2e
+
+- Build options so also supports MERG CANEther hardware
+- CBUS parameter block to latest CBUS spec, supported by RQNPN command (backwards compatible)
+- CAN bootloader supported and tested (have to bootload via another PC interface module)
+- Parse all CBUS commands regardless of which interface they arrive on - so can also now configure via CAN from another PC interface
+- Any responses transmitted by CANGC1e/CANEther now sent to Ethernet and CAN
+- All CBUS messages arriving from a CBUS node connected by Ethernet are relayed to all other Ethernet nodes as well as to CAN.
+- Add some software debounce to the pushbutton, to fix problem of sometimes jumping into setup mode if there is a spike
+- CBUS node number assignment sequence is now CBUS and FCU compatible when JP2/LK1 is fitted, it still works the old way if the link is removed.
+- Added support for RQMN opcode with response of NAME
+- Fixed a problem with incorrect DLC length byte when sending some opcodes - did not matter before as these opcodes were only sent by gridconnect,
+  but matters now as these are also tranmisttted via CAN.
+- Writes of Node Variables are acknowledged by WRACK  
+- When DHCP IP address assignment is selected by powering up with the button in, this setting now sticks and the NV flag is changed.
+  The setting and flag can be toggled back by powering up with the button in again.
+- When assinging IP address using DHCP, the host name "CBUS" is sent to the DHCP server. 
+  This shows up in the listing on the router so you can see which IP address has been assigned.
+
+
+
+
+
+
+Detailed source file changes
+
+Link control file
+
+18f2585.lkr	- Added CBUS parameter block definition at fixed address
+
+Assembler source files
+
+boot4.asm	- Change referred user vectors to 0x800 upwards for FCU compatibility
+
+
+C header files
+
+cbusdefs8d.h	- Replaces cbusdefs.h for latest spec compatibility
+
+cangc1e.h	- Add #if directives so can be built for CANGC1e or CANEther.
+		- Define manufacturer, module type, name and default NN for CANEther
+		- Define additional parameters used in latest CBUS parameter block
+		- Define pushbutton software debounce count
+		
+gcaeth.h	- Modified definition of CBusEthBroadcast, see notes below in gcaeth.c	
+
+io.h		- Added definition of outputs for yellow/green CBUS leds fitted to CANEther
+
+project.h	- Define additional parameters used in latest CBUS parameter block
+
+TCPIPConfig.h	- Change default host name to "CBUS"
+		- Set default MAC address to include major, minor version number and build number in last 3 bytes
+
+DHCP.h		- Change length of DHCP parameter list to not request host name (we send it)
+
+
+
+C source files
+
+All modules which include the CBUS opcode defintions file have been updated to use the latest version
+
+c018i.c		- Set code entry to 0x800 as per boot4.asm
+
+cangc1e.c	- Define CBUS parameter block as per current spec
+		- User vectors defined at 0x800 upwards
+		- Add debounce counter for pushbutton
+		- Add parse CBUS commands that arrive via CAN
+		- Add parameter to calls to CBusEthBroadcast (see below)
+		
+commands.c	- parseCmdEth is now also used to parse commands when they arrive via CAN.
+		- Add code to work out frame type on commands received via CAN.
+		- Add parameter to calls to CBusEthBroadcast (see below)
+		- Add outputs to Green and Yellow LEDs on CANEther
+		- Change response to SNN for CBUS compatibility - still works the old way
+		  if JP2/LK1 is not fitted.
+		- Add support for opcode RQMN with response opcode NAME
+		- Enable BOOT opcode as this now works when bootloaded via anohter PC interface
+		- Fix incorrect dlc message length byte in NVRD
+		- Add writes of Node Variables are acknowledged by a WRACK command
+		- RQNPN opcode supports additional parameters, index 0 returns number of parameters supported.
+		- Add correct CANID in transmission of RQNPN (was missing)
+		
+eth.c		- Add definition of host name
+		- Change startup behaviour so When DHCP IP address assignment is selected by powering up with
+		  the button in, this setting now sticks and the NV flag is changed. The setting and flag can
+		  be toggled back by powering up with the button in again.
+
+gcaeth.c	- Add parameter to calls to CBusEthBroadcast (see below)
+		- CBusEthBroadcast now transmits packet to CAN and to all connected Ethernet nodes
+		- Added a parameter to CBusEthBroadcast to exclude a given socket, so it does not transmit back
+		  to the node that sent the packet. See comments in source file for full details.
+		  
+io.c		- Add initialisation of outputs for yellow/green CBUS leds fitted to CANEther
+		- Added flash of yellow LED on CANEther during setup mode
+		
+DHCP.c		- Add code to send hostname to server when getting IP address by DHCP		
+
+		  
+		
+		
+		
+		
+
+
+
