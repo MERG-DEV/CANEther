@@ -160,6 +160,9 @@ void main(void) {
     IdleTime = 120; // 120 * 500ms = 60 sec.
     eeWrite(EE_IDLETIME, IdleTime);
   }
+  IdleTime = eeRead(EE_IDLETIME);   // as set by NV 17
+  if (IdleTime == 0xFF)
+    IdleTime = 120;
 
   setupIO();
   
@@ -215,8 +218,8 @@ void main(void) {
     if (TXERRCNT > maxtxerr) {
       maxtxerr = TXERRCNT;
     }
-    if (RXERRCNT > maxtxerr) {
-      maxtxerr = TXERRCNT;
+    if (RXERRCNT > maxrxerr) {
+      maxrxerr = RXERRCNT;
     }
 
     if (checkFlimSwitch()) {

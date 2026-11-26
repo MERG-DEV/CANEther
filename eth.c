@@ -260,7 +260,7 @@ void InitAppConfig(void)
     NV1 ^= CFG_DHCP_CLIENT; // Toggle DHCP flag;  
     eeWrite(EE_NV, NV1);
   }
-  AppConfig.Flags.bIsDHCPEnabled = ((NV1 && CFG_DHCP_CLIENT) != 0);
+  AppConfig.Flags.bIsDHCPEnabled = ((NV1 & CFG_DHCP_CLIENT) != 0);
 #else
   AppConfig.Flags.bIsDHCPEnabled = FALSE;
 #endif
