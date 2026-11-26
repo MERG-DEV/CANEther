@@ -49,6 +49,7 @@ void setupIO(void) {
   TRISA = 0;
   TRISB = 0;
   TRISC = 0;   
+  TRISBbits.TRISB3 = 1; // CANRX must be an input (the ECAN module drives CANTX itself)
   
   // Set pin usage
   

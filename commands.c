@@ -291,7 +291,7 @@ unsigned char parseCmdEth(CANMsg* p_canmsg, unsigned char frametype) {
 
           if (NV1 & CFG_REINIT_TCPIP)   // MS bit set to reinitialise TCP/IP parameters
           {
-             InitAppConfig();   // Reinitialise TCP/IP parameters
+             InitAppConfig(FALSE);   // Reinitialise TCP/IP parameters from EEPROM
           }
           else
           {
