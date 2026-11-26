@@ -76,6 +76,12 @@ void isr_high(void) {
 //
 // Low priority interrupt. Used for TCPIP TickUpdate, ECAN FIFO and CAN transmit interrupts
 //
+// Each source is handled only if its interrupt is enabled: the main loop
+// disables an interrupt to keep its handler out while it works on the same
+// data, and another source may still bring us here meanwhile. Each handler
+// clears its own flag, so a flag raised while this runs is kept and brings us
+// straight back.
+//
 
 #pragma interruptlow isr_low
 
@@ -85,7 +91,7 @@ void isr_low(void) {
 
 #ifdef WITHCAN
   // Check for receive high water mark interrupt
-  if (PIR3bits.FIFOWMIF == 1) {
+  if (PIE3bits.FIFOWMIE && PIR3bits.FIFOWMIF) {
     PIE3bits.FIFOWMIE = 0;
     PIR3bits.FIFOWMIF = 0;
     canbusFifo();
@@ -93,22 +99,17 @@ void isr_low(void) {
   }
 
   // Check for transmit buffer interrupt
-  if (PIR3bits.TXBnIF == 1) {
-    PIE3bits.TXBnIE = 0;
+  if (PIE3bits.TXBnIE && PIR3bits.TXBnIF) {
     PIR3bits.TXBnIF = 0;
-    canTxFifo();    // Interrupt only re-enabled if another packet sent
+    canTxDone();
   }
 
   // Check for transmit error interrupt
-  if (PIR3bits.ERRIF == 1)
+  if (PIE3bits.ERRIE && PIR3bits.ERRIF)
   {
-      PIE3bits.ERRIE = 0;
       PIR3bits.ERRIF = 0;
       canTxError();
-      PIE3bits.ERRIE = 1;
   }
 
 #endif
-  
-  PIR3 = 0; // clear interrupts
 }

@@ -68,12 +68,21 @@ enum bufbytes {
 #define ECAN_MSG_STD    0
 #define ECAN_MSG_XTD    1
 
-extern BYTE  maxCanTxFifo;
+#define CAN_TX_FIFO_SIZE 16  // frames in the software transmit FIFO (one 256-byte RAM bank)
 
+extern BYTE  maxCanTxFifo;
+extern BYTE  txErrCount;
+extern BYTE  txTimeoutCount;
+extern BYTE  txDropCount;
+
+BYTE canDataLength(BYTE dlcReg);
 BOOL canbusRecv(CANMsg *msg);
 BOOL canbusSend( CANMsg *msg );
+BYTE canbusTxFree(void);
+BOOL canbusTxErrorWarning(void);
+void canbusService(void);
 void canbusFifo(void);
-void canTxFifo( void );
+void canTxDone( void );
 void checkCANTimeout( void );
 void canTxError( void );
 
