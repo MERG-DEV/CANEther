@@ -34,7 +34,11 @@ void openBridge( void );
 BOOL isBridgeConnected( void );
 void CBusEthServer(void);
 unsigned char CBusEthBroadcast(CANMsg* msg, BYTE excludeConn);
+BYTE CBusEthSendTo(CANMsg *msg, BYTE connMask);
+void CBusEthFlush(void);
 
 extern BYTE nrClients;
+extern BYTE ethDropCount;
+extern BYTE gcRejectCount;
 
 #endif

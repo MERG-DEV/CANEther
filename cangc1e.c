@@ -112,6 +112,12 @@ const rom char module_type[] = MODULE_TYPE;
 
 void initIO(void);
 
+#ifdef WITHCAN
+static void canToEthernet(void);
+static CANMsg canRxPending;         // a frame from CAN that some connections could not take yet
+static BYTE   canRxPendingConns;    // ...and those connections (bit n for connection n)
+#endif
+
 /*
  * Interrupt vectors
  */
@@ -192,21 +198,10 @@ void main(void) {
 
   // Loop forever (nothing lasts forever...)
   while (1) {
-    CANMsg cmsg;
-    BYTE rsend;
-
-    rsend = FALSE;
-    // Check for Rx
 #ifdef WITHCAN
-    while (canbusRecv(&cmsg)) 
-    {
-      if (parseCmdEth(&cmsg, 0)) {
-        if (CBusEthBroadcast(&cmsg, 0xFE)) {
-          rsend = TRUE;
-          break;
-        }
-      }
-    }
+    canbusService();    // keep CAN transmit going
+    canToEthernet();
+    CBusEthFlush();     // send CAN frames to Ethernet now, not after the stack's auto-transmit delay
 #endif    
 
     if (doEthTick) {
@@ -215,12 +210,7 @@ void main(void) {
     }
 
     doEth();
-
-    if (rsend) {
-      if (!CBusEthBroadcast(&cmsg, 0xFF)) {
-        LED3 = LED_ON;
-      }
-    }
+    CBusEthFlush();     // frames relayed between connections, and replies
 
     if (TXERRCNT > maxtxerr) {
       maxtxerr = TXERRCNT;
@@ -259,6 +249,38 @@ void main(void) {
     }
   }
 }
+
+#ifdef WITHCAN
+// Pass frames received from CAN to the Ethernet connections.
+// If a connection's send buffer is full, the frame is tried again for that
+// connection only on the next pass, after the stack has run, and dropped for
+// it if there is still no room. No later frame goes before that, so each
+// connection gets frames in bus order.
+
+static void canToEthernet(void) {
+  CANMsg cmsg;
+  BYTE failed;
+
+  if (canRxPendingConns) {
+    if (CBusEthSendTo(&canRxPending, canRxPendingConns))
+      ethDropCount++;
+    else
+      LED3 = LED_ON;
+    canRxPendingConns = 0;
+  }
+
+  while (canbusRecv(&cmsg)) {
+    if (parseCmdEth(&cmsg, 0)) {
+      failed = CBusEthBroadcast(&cmsg, 0xFE);
+      if (failed) {
+        canRxPending = cmsg;
+        canRxPendingConns = failed;
+        break;
+      }
+    }
+  }
+}
+#endif
 
 void initIO(void) {
   int idx = 0;
