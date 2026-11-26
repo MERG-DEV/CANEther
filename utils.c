@@ -50,11 +50,11 @@ void eeWrite(unsigned char addr, unsigned char data) {
   EECON1bits.WREN = 1; // Enable writing
   EEADR = addr; // Set the address
   EEDATA = data; // Set the data
-  EECON2 = 0x55; // Write initiate sequence
-  EECON2 = 0xaa; // Write initiate sequence
   WDTCON =0;            // Disable watchdog reset during EEPROM write
   RCONbits.SBOREN = 0;  // Disable brown out reset during EEPROM write
-  EECON1bits.WR = 1; // Start writing
+  EECON2 = 0x55; // Write initiate sequence: these three must follow
+  EECON2 = 0xaa; // one another with nothing between, or the write
+  EECON1bits.WR = 1; // does not start
   
   while (!PIR2bits.EEIF)
     ; // Wait for write to finish

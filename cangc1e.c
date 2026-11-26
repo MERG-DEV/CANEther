@@ -172,6 +172,7 @@ void main(void) {
   }
   
   resetDefaults = FLiMPressed && !JP2;
+  toggleDHCP = FLiMPressed && JP2;
   
           
   setMacAddress( resetDefaults );  
@@ -215,12 +216,12 @@ void main(void) {
     CANMsg cmsg;
     BYTE rsend;
 
+    ClrWdt();
     rsend = FALSE;
     // Check for Rx
 #ifdef WITHCAN
     while (canbusRecv(&cmsg)) 
     {
-      ClrWdt();
       if (parseCmdEth(&cmsg, 0)) {
         if (CBusEthBroadcast(&cmsg, 0xFE)) {
           rsend = TRUE;
