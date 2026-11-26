@@ -42,15 +42,27 @@
 typedef struct _CBUSETH_INFO {
   TCP_SOCKET socket;
   unsigned char idle;
+  BYTE rxLen;                           // characters of the frame being received; 0 = waiting for ':'
+  BYTE rxBuf[MAX_CBUSETH_CMD_LEN];      // the frame being received, which may arrive in pieces
 } CBUSETH_INFO;
 typedef BYTE CBUSETH_HANDLE;
 
+#define ALL_CONNECTIONS ((BYTE) ((1 << TCP_SOCKET_COUNT) - 1))   // one bit per connection
+
+#ifdef WITHCAN
+#define CAN_TX_RESERVE 2    // CAN frames one received frame can cause: itself and a reply (QNN causes both)
+#endif
 
 static CBUSETH_INFO HCB[TCP_SOCKET_COUNT];
 
 BYTE nrClients = 0;
 BYTE hbeatCounter = 0;
 BYTE bridgeSocketIndex = 0xFE;
+BYTE ethDropCount = 0;      // frames a connection did not get because its send buffer stayed full
+BYTE gcRejectCount = 0;     // malformed or overlong frames received and discarded
+
+static BYTE pendingFlush = 0;   // connections given frames since the last CBusEthFlush
+static BYTE firstConn = 0;      // connection read first, taken in turn so all get a fair share
 
 
 static BYTE CBusEthProcess(void);
@@ -69,113 +81,177 @@ static BYTE CBusEthProcess(void);
 
 static char hexa[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
 
-static byte msg2ASCII(CANMsg* msg, char* s) {
+// Frame to GridConnect text, at most 28 characters. Returns its length.
+// The data length of a CAN frame comes from its DLC. The CANEther's own
+// status frames (Y) keep the length their opcode implies, as before.
 
-  if (msg->b[sidl] & 0x08) {
-    /* Extended Frame */
-    byte len = msg->b[dlc] & 0x0F;
-    byte i;
-    s[0] = ':';
-    s[1] = 'X';
-    s[2] = hexa[msg->b[sidh] >> 4];
-    s[3] = hexa[msg->b[sidh] & 0x0F];
-    s[4] = hexa[msg->b[sidl] >> 4];
-    s[5] = hexa[msg->b[sidl] & 0x0F];
+static byte msg2ASCII(CANMsg* msg, char* s) {
+  BYTE len;
+  BYTE i;
+  BYTE idx;
+  BOOL extended = (msg->b[sidl] & 0x08) != 0;
+  BOOL eth = !extended && (msg->b[dlc] & 0x80);
+
+  s[0] = ':';
+  s[1] = (extended ? 'X' : (eth ? 'Y' : 'S'));
+  s[2] = hexa[msg->b[sidh] >> 4];
+  s[3] = hexa[msg->b[sidh] & 0x0F];
+  s[4] = hexa[msg->b[sidl] >> 4];
+  s[5] = hexa[msg->b[sidl] & 0x0F];
+  idx = 6;
+  if (extended) {
     s[6] = hexa[msg->b[eidh] >> 4];
     s[7] = hexa[msg->b[eidh] & 0x0F];
     s[8] = hexa[msg->b[eidl] >> 4];
     s[9] = hexa[msg->b[eidl] & 0x0F];
-    s[10] = ((msg->b[dlc] & 0x40) ? 'R' : 'N');
-    for (i = 0; i < len; i++) {
-      s[11 + i * 2] = hexa[msg->b[d0 + i] >> 4];
-      s[11 + i * 2 + 1] = hexa[msg->b[d0 + i] & 0x0F];
-    }
-    s[11 + i * 2] = ';';
-    return 11 + i * 2 + 1;
-  } else {
-    /* Standard Frame */
-    byte len = getDataLen(msg->b[d0], ((msg->b[dlc]&0x80) ? TRUE : FALSE));
-    byte i;
-    byte idx = 9;
-    s[0] = ':';
-    s[1] = ((msg->b[dlc] & 0x80) ? 'Y' : 'S');
-    s[2] = hexa[msg->b[sidh] >> 4];
-    s[3] = hexa[msg->b[sidh] & 0x0F];
-    s[4] = hexa[msg->b[sidl] >> 4];
-    s[5] = hexa[msg->b[sidl] & 0x0F];
-    s[6] = ((msg->b[dlc] & 0x40) ? 'R' : 'N');
-    s[7] = hexa[msg->b[d0] >> 4];
-    s[8] = hexa[msg->b[d0] & 0x0F];
-    for (i = 0; i < len; i++) {
-      s[idx + i * 2] = hexa[msg->b[d1 + i] >> 4];
-      s[idx + i * 2 + 1] = hexa[msg->b[d1 + i] & 0x0F];
-    }
-    s[idx + i * 2] = ';';
-    return idx + i * 2 + 1;
+    idx = 10;
+  }
+  s[idx++] = ((msg->b[dlc] & 0x40) ? 'R' : 'N');
+
+  if (eth)
+    len = getDataLen(msg->b[d0], TRUE) + 1;
+  else
+    len = canDataLength(msg->b[dlc]);
+
+  for (i = 0; i < len; i++) {
+    s[idx++] = hexa[msg->b[d0 + i] >> 4];
+    s[idx++] = hexa[msg->b[d0 + i] & 0x0F];
+  }
+  s[idx++] = ';';
+  return idx;
+}
+
+// Value of a hex digit, either case, or 0xFF if c is not one.
+
+static BYTE hexDigit(BYTE c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  return 0xFF;
+}
+
+// Two hex digits to a byte. FALSE if either is not a hex digit.
+
+static BOOL hexByte(BYTE* s, BYTE* val) {
+  BYTE hi = hexDigit(s[0]);
+  BYTE lo = hexDigit(s[1]);
+
+  if (hi == 0xFF || lo == 0xFF)
+    return FALSE;
+  *val = (hi << 4) | lo;
+  return TRUE;
+}
+
+// GridConnect text to a frame. s holds one whole frame, ':' to ';'.
+// Returns the frame type, or 0 if the text is not a well-formed frame.
+// The data length is the number of data bytes given (0 to 8).
+
+static byte ASCII2Msg(BYTE* s, byte inlen, CANMsg* msg) {
+  BYTE type;
+  BYTE idBytes;
+  BYTE pos;
+  BYTE len;
+  BYTE i;
+
+  switch (s[1]) {
+    case 'S': type = CAN_FRAME; idBytes = 2; break;
+    case 'Y': type = ETH_FRAME; idBytes = 2; break;
+    case 'X': type = EXT_FRAME; idBytes = 4; break;
+    default:  return 0;
+  }
+  pos = 2 + 2 * idBytes;                // where N or R is
+  if (inlen < pos + 2)
+    return 0;
+  len = inlen - pos - 2;                // hex digits of data
+  if ((len & 1) || len > 16)
+    return 0;
+  len >>= 1;
+
+  msg->b[con] = 0;
+  msg->b[eidh] = 0;
+  msg->b[eidl] = 0;
+  for (i = 0; i < idBytes; i++)
+    if (!hexByte(&s[2 + 2 * i], &msg->b[sidh + i]))
+      return 0;
+  if (s[pos] != 'N' && s[pos] != 'R')
+    return 0;
+  for (i = 0; i < len; i++)
+    if (!hexByte(&s[pos + 1 + 2 * i], &msg->b[d0 + i]))
+      return 0;
+
+  if (type == EXT_FRAME)
+    msg->b[sidl] |= 0x08;               // EXIDE: extended identifier
+  else if (len == 0)
+    return 0;                           // a CBUS frame starts with an opcode
+  else
+    msg->b[sidl] &= 0xF7;               // standard identifier
+
+  msg->b[dlc] = len;
+  if (s[pos] == 'R')
+    msg->b[dlc] |= 0x40;
+  return type;
+}
+
+// Add a character received on a connection to the frame being assembled.
+// Returns the length of a complete frame, ':' to ';', now in rxBuf, or 0.
+// A ':' always starts a new frame, so after a malformed or overlong frame
+// reception picks up again at the next one.
+
+static BYTE assembleFrame(CBUSETH_INFO* ph, BYTE c) {
+  BYTE n;
+
+  if (c == ':') {
+    ph->rxBuf[0] = c;
+    ph->rxLen = 1;
+    return 0;
+  }
+  if (ph->rxLen == 0)
+    return 0;                           // between frames
+  if (ph->rxLen == MAX_CBUSETH_CMD_LEN) {
+    ph->rxLen = 0;                      // too long to be a frame: drop it
+    gcRejectCount++;
+    return 0;
+  }
+  ph->rxBuf[ph->rxLen++] = c;
+  if (c != ';')
+    return 0;
+  n = ph->rxLen;
+  ph->rxLen = 0;
+  return n;
+}
+
+// Act on a frame received on connection conn.
+
+static void processFrame(BYTE* s, BYTE len, BYTE conn) {
+  CANMsg canmsg;
+  BYTE type;
+
+  led2timer = 2;
+  LED2 = LED_ON;
+  type = ASCII2Msg(s, len, &canmsg);
+  if (type == 0) {
+    gcRejectCount++;
+    return;
+  }
+  if (parseCmdEth(&canmsg, type)) {
+    CBusEthBroadcast(&canmsg, conn);  // Send message to other connected Ethernet nodes and CAN
   }
 }
 
-/*  StrOp.fmtb( frame+1, ":%c%02X%02XN%02X;", eth?'Y':'S', (0x80 + (prio << 5) + (cid >> 3)) &0xFF, (cid << 5) & 0xFF, cmd[0] );*/
-static char hexb[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 10, 11, 12, 13, 14, 15};
+// TRUE if a frame received from Ethernet can be taken now: the CAN transmit
+// FIFO has room for what it may send. While the CAN controller is at error
+// warning level, frames are taken anyway (and dropped if the FIFO is full),
+// so a CAN bus fault does not hold up Ethernet.
 
-static byte ASCII2Msg(unsigned char* ins, byte inlen, CANMsg* msg) {
-  byte len = 0;
-  byte i;
-  byte type = CAN_FRAME;
-
-  unsigned char* s = ins;
-  for (i = 0; i < inlen; i++) {
-    if (s[i] == ':' && (s[i + 1] == 'S' || s[i + 1] == 'Y')) {
-      if (s[i + 1] == 'Y') {
-        type = ETH_FRAME;
-      }
-      s += i;
-      break;
-    } else if (s[i] == ':' && s[i + 1] == 'X') {
-      type = EXT_FRAME;
-      s += i;
-      break;
-    }
-  }
-  if (i == inlen) {
-    return 0;
-  }
-
-  if (type == EXT_FRAME) {
-    msg->b[sidh] = (hexb[s[2] - 0x30] << 4) + hexb[s[3] - 0x30];
-    msg->b[sidl] = (hexb[s[4] - 0x30] << 4) + hexb[s[5] - 0x30];
-    msg->b[eidh] = (hexb[s[6] - 0x30] << 4) + hexb[s[7] - 0x30];
-    msg->b[eidl] = (hexb[s[8] - 0x30] << 4) + hexb[s[9] - 0x30];
-    // copying all data bytes:
-    for (i = 0; i < 8 && s[11 + 2 * i] != ';'; i++) {
-      msg->b[d0 + i] = (hexb[s[11 + 2 * i] - 0x30] << 4) + hexb[s[11 + 2 * i + 1] - 0x30];
-    }
-    msg->b[dlc] = i;
-    if (s[10] == 'R')
-      msg->b[dlc] |= 0x40;
-  } else {
-    byte l_sidh, l_sidl, canid;
-    l_sidh = (hexb[s[2] - 0x30] << 4) + hexb[s[3] - 0x30];
-    l_sidl = (hexb[s[4] - 0x30] << 4) + hexb[s[5] - 0x30];
-    canid = (l_sidl >> 5) + ((l_sidh & 0x0F) << 3);
-
-    if (CANID != canid) {
-      // Use own CANID
-      //CANID = canid;
-    }
-    msg->b[sidh] = l_sidh;
-    msg->b[sidl] = l_sidl;
-
-    msg->b[d0] = (hexb[s[7] - 0x30] << 4) + hexb[s[8] - 0x30];
-    len = getDataLen(msg->b[d0], FALSE);
-    for (i = 0; i < len; i++) {
-      msg->b[d1 + i] = (hexb[s[9 + 2 * i] - 0x30] << 4) + hexb[s[9 + 2 * i + 1] - 0x30];
-    }
-    msg->b[dlc] = len + 1;
-    if (s[6] == 'R')
-      msg->b[dlc] |= 0x40;
-  }
-  return type;
+static BOOL canTakeFrame(void) {
+#ifdef WITHCAN
+  return canbusTxFree() >= CAN_TX_RESERVE || canbusTxErrorWarning();
+#else
+  return TRUE;
+#endif
 }
 
 
@@ -193,6 +269,7 @@ void CBusEthInit(void) {
           
     HCB[i].socket = TCPOpen(0, TCP_OPEN_SERVER, eeReadShort(EE_PORTNUM), TCP_PURPOSE_GENERIC_TCP_SERVER);
     HCB[i].idle = 0;
+    HCB[i].rxLen = 0;
   }
 }
 
@@ -238,6 +315,7 @@ void openBridge( void )
 
             HCB[conn].socket = TCPOpen( remoteIP.Val, TCP_OPEN_IP_ADDRESS, eeReadShort(EE_REMOTEPORT), TCP_PURPOSE_GENERIC_TCP_CLIENT);
             HCB[conn].idle = 0;
+            HCB[conn].rxLen = 0;
             bridgeSocketIndex = conn;
         }
     }
@@ -270,47 +348,45 @@ void CBusEthServer(void) {
 }
 
 static byte CBusEthProcess(void) {
+  byte i;
   byte conn;
   byte nrconn = 0;
+  BYTE c;
+  BYTE len;
 
-  for (conn = 0; conn < TCP_SOCKET_COUNT; conn++) {
-    BYTE cbusData[MAX_CBUSETH_CMD_LEN + 1];
-    CBUSETH_INFO* ph = &HCB[conn];
+  for (i = 0; i < TCP_SOCKET_COUNT; i++) {
+    CBUSETH_INFO* ph;
+
+    conn = firstConn + i;
+    if (conn >= TCP_SOCKET_COUNT)
+      conn -= TCP_SOCKET_COUNT;
+    ph = &HCB[conn];
 
     if (!TCPIsConnected(ph->socket)) {
       ph->idle = 0;
+      ph->rxLen = 0;
       continue;
     }
     nrconn++;
 
     if (TCPIsGetReady(ph->socket)) {
-      BYTE len = 0;
-      BYTE type;
-      CANMsg canmsg;
       ph->idle = 0;
 
-      while (len < MAX_CBUSETH_CMD_LEN && TCPGet(ph->socket, &cbusData[len])) {
-        if (cbusData[len++] == ';') {
-          cbusData[len] = '\0';
-          if (cbusData[0] == ':') {
-            led2timer = 2;
-            LED2 = LED_ON;
-            type = ASCII2Msg(cbusData, len, &canmsg);
-            if (type > 0) {
-              if (parseCmdEth(&canmsg, type)) {
-                CBusEthBroadcast(&canmsg, conn);  // Send message to other connected Ethernet nodes
-              }
-            }
-          }
-          len = 0;
+      // Take characters only while a frame can be acted on. Otherwise they
+      // wait with TCP, whose receive window then makes the sender wait.
+      while (canTakeFrame() && TCPGet(ph->socket, &c)) {
+        len = assembleFrame(ph, c);
+        if (len) {
+          processFrame(ph->rxBuf, len, conn);
         }
       }
-      TCPDiscard(ph->socket);
     } else if (ph->idle > IdleTime) {
       TCPDisconnect(ph->socket);
       ph->idle = 0;
       if (NV1 & CFG_POWEROFF_ATIDLE) {
         CANMsg canmsg;
+        canmsg.b[sidh] = (CANID >> 3);
+        canmsg.b[sidl] = (CANID << 5);
         canmsg.b[d0] = OPC_RTOF;
         canmsg.b[dlc] = 1;
 #ifdef WITHCAN        
@@ -319,7 +395,45 @@ static byte CBusEthProcess(void) {
       }
     }
   }
+  if (++firstConn == TCP_SOCKET_COUNT)
+    firstConn = 0;
   return nrconn;
+}
+
+// Send a frame to each connection in connMask (bit n for connection n).
+// Returns the connections it could not be sent to because their send
+// buffer was full.
+
+BYTE CBusEthSendTo(CANMsg *msg, BYTE connMask)
+{
+  BYTE conn;
+  BYTE bit;
+  char s[32];
+  BYTE len;
+  BYTE failed;
+
+  failed = 0;
+  len = msg2ASCII(msg, s);
+
+  for (conn = 0, bit = 1; conn < TCP_SOCKET_COUNT; conn++, bit <<= 1)
+  {
+    if (connMask & bit) {
+        CBUSETH_INFO* ph = &HCB[conn];
+        if (TCPIsConnected(ph->socket)) {
+          if (TCPIsPutReady(ph->socket) >= len) {
+            TCPPutArray(ph->socket, (byte*) s, len);
+            pendingFlush |= bit;
+            led2timer = 2;
+            LED2 = LED_ON;
+          } else {
+            LED3 = LED_OFF;
+            led3timer = 100;
+            failed |= bit;
+          }
+        }
+    }
+  }
+  return failed;
 }
 
 // Send CBUS message to each connected TCP socket.
@@ -328,43 +442,42 @@ static byte CBusEthProcess(void) {
 // so can be used to send message to all other sockets except the one that it was received on
 // To send to all connected sockets, set excludeConn to 0xFF
 // TO send to everywhere except CAN, set excludeConn to 0xFE - PNB 1/1/13
+// Returns the connections that could not take the frame (see CBusEthSendTo).
 
 BYTE CBusEthBroadcast(CANMsg *msg, BYTE excludeConn) 
 {
+  BYTE connMask;
+  BYTE failed;
 
-  BYTE conn;
-  char s[32];
-  BYTE len;
-  BYTE err;
+  connMask = ALL_CONNECTIONS;
+  if (excludeConn < TCP_SOCKET_COUNT)
+    connMask &= (BYTE) ~(1 << excludeConn);
 
-  
-  err = FALSE;
-  len = msg2ASCII(msg, s);
-
-  for (conn = 0; conn < TCP_SOCKET_COUNT; conn++) 
-  {
-    if (conn != excludeConn) {
-        CBUSETH_INFO* ph = &HCB[conn];
-        if (TCPIsConnected(ph->socket)) {
-          if (TCPIsPutReady(ph->socket) > len) {
-            TCPPutArray(ph->socket, (byte*) s, len);
-            led2timer = 2;
-            LED2 = LED_ON;
-          } else {
-            LED3 = LED_OFF;
-            led3timer = 100;
-            err++;
-          }
-        }
-    }
-  }
+  failed = CBusEthSendTo(msg, connMask);
 
 #ifdef WITHCAN
   if ((excludeConn != 0xFE) && !(msg->b[dlc] & 0x80))
     canbusSend(msg); //  Send to CAN as well as Ethernet except for Y frames
 #endif
   
-  return err;
+  return failed;
+}
+
+// Send now what each connection has been given since the last call, rather
+// than leaving it for the stack's auto-transmit (up to 40 ms later). Frames
+// given in one pass of the main loop share a TCP segment.
+
+void CBusEthFlush(void)
+{
+  BYTE conn;
+  BYTE bit;
+
+  for (conn = 0, bit = 1; conn < TCP_SOCKET_COUNT; conn++, bit <<= 1)
+  {
+    if (pendingFlush & bit)
+      TCPFlush(HCB[conn].socket);
+  }
+  pendingFlush = 0;
 }
 
 /* called every 500ms */

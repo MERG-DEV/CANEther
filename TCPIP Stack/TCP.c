@@ -114,7 +114,9 @@
 
 // TCP Timeout and retransmit numbers
 #define TCP_START_TIMEOUT_VAL   	((DWORD)TICK_SECOND*1)	// Timeout to retransmit unacked data
+#if !defined(TCP_DELAYED_ACK_TIMEOUT)					// TCPIPConfig.h may set it
 #define TCP_DELAYED_ACK_TIMEOUT		((DWORD)TICK_SECOND/10)	// Timeout for delayed-acknowledgement algorithm
+#endif
 #define TCP_FIN_WAIT_2_TIMEOUT		((DWORD)TICK_SECOND*5)	// Timeout for FIN WAIT 2 state
 #define TCP_KEEP_ALIVE_TIMEOUT		((DWORD)TICK_SECOND*10)	// Timeout for keep-alive messages when no traffic is sent
 #define TCP_CLOSE_WAIT_TIMEOUT		((DWORD)TICK_SECOND/5)	// Timeout for the CLOSE_WAIT state

@@ -227,6 +227,14 @@
  */
 #define STACK_CLIENT_MODE
 
+/* TCP delayed acknowledgement
+ *   TCP.c waits up to 100 ms before acknowledging a lone segment. A PC
+ *   that holds back data until its previous data is acknowledged (Nagle's
+ *   algorithm, JMRI's "Send frames: Grouped") then waits that long for
+ *   each later frame of a burst. 0 acknowledges at the next StackTask().
+ */
+#define TCP_DELAYED_ACK_TIMEOUT		(0ul)
+
 /* TCP Socket Memory Allocation
  *   TCP needs memory to buffer incoming and outgoing data.  The
  *   amount and medium of storage can be allocated on a per-socket

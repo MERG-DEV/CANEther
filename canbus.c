@@ -31,7 +31,7 @@
 #define SW_FIFO 16
 #define SW_FIFO_MAX 32
 
-#define LARB_RETRIES 10;
+#define CAN_TX_TIMEOUT_TICKS 2      // half-second ticks before a frame the bus will not take is abandoned
 
 typedef struct {
   BYTE msg[16];
@@ -47,35 +47,45 @@ far CAN_PACKET Fifo1[SW_FIFO];
 
 #pragma udata VARS_TXFIFO
 
-far CAN_PACKET TxFifo[SW_FIFO];
+far CAN_PACKET TxFifo[CAN_TX_FIFO_SIZE];
 
 #pragma udata
 
 far BYTE FifoIdxW = 0;
 far BYTE FifoIdxR = 0;
-far BYTE FifoTxIdxW = 0;
-far BYTE FifoTxIdxR = 0;
 
-BYTE  larbRetryCount;
-BYTE  canTransmitTimeout;
-BOOL  canTransmitFailed;
-BYTE  larbCount;
-BYTE  txErrCount;
-BYTE  txTimeoutCount;
-BYTE  maxCanTxFifo;
+// Software transmit FIFO, in front of the one transmit buffer used (TXB0).
+// It is shared by the main loop and the low priority interrupt: the main loop
+// changes it only with low priority interrupts disabled.
+static BYTE txHead;                         // next entry to fill
+static BYTE txTail;                         // next entry to send
+static volatile BYTE txCount;               // entries waiting
 
+static volatile BYTE canTransmitTimeout;    // half-second ticks left for the frame in TXB0; 0 = none
+static volatile BOOL canTxTimedOut;         // set by the timer interrupt when they run out
+static BOOL txAbortPending;                 // abort requested; TXB0 not free until it is confirmed
+
+BYTE  txErrCount;                           // CAN error interrupts (error state changes, overflow)
+BYTE  txTimeoutCount;                       // frames abandoned because the bus would not take them
+BYTE  txDropCount;                          // frames not queued because the FIFO was full
+BYTE  maxCanTxFifo;                         // most frames ever waiting in the FIFO
 
 
 static BYTE* _PointBuffer(BYTE b);
+static void txStartNext(void);
 
 void cbusSetup(void) {
 
-  larbCount = 0;
   txErrCount = 0;
   txTimeoutCount = 0;
-  canTransmitFailed = FALSE;
-  canTransmitTimeout = 0;
+  txDropCount = 0;
   maxCanTxFifo = 0;
+  txHead = 0;
+  txTail = 0;
+  txCount = 0;
+  canTransmitTimeout = 0;
+  canTxTimedOut = FALSE;
+  txAbortPending = FALSE;
   
   // Put module into Configuration mode.
   CANCON = 0b10000000;
@@ -156,167 +166,168 @@ void cbusSetup(void) {
   TXBIEbits.TXB2IE = 0;
   CANCON = 0;
   PIE3bits.FIFOWMIE = 1; // Fifo 4 left int
+  PIE3bits.TXBnIE = 1;   // Transmit buffer has sent its frame
   PIE3bits.ERRIE = 1;
 }
 
-#define buffers 3
+// Number of data bytes in a frame, from its DLC register value.
+// A DLC field of 9 to 15 is valid on the bus and means 8 bytes.
 
-BOOL canSend(CANMsg *msg) {
-
-  BYTE* ptr;
-  BOOL  fullUp;
-  BYTE hiIndex;
-
-  msg->b[con] = 0;
-  msg->b[dlc] &= 0x0F;  // Ensure not RTR 
-  
-  if (msg->b[dlc] > 8)
-      msg->b[dlc] = 8;
-
-  PIE3bits.TXBnIE = 0;  // Disable transmit buffer interrupt whilst we fiddle with registers and fifo
-
-  // On chip Transmit buffers do not work as a FIFO, so use just one buffer and implement a software fifo
-
-  if (((FifoTxIdxR == FifoTxIdxW) || canTransmitFailed) && (!TXB0CONbits.TXREQ))  // check if software fifo empty and transmit buffer ready
-  {
-     ptr = (BYTE*) & TXB0CON;
-     memcpy(ptr, (void *) msg->b, msg->b[dlc] + 6);
-
-     larbRetryCount = LARB_RETRIES;
-     canTransmitTimeout = 2;	// half second intervals
-     canTransmitFailed = FALSE;
-
-     TXB0CONbits.TXREQ = 1;    // Initiate transmission
-     fullUp = FALSE;
-     PIE3bits.TXBnIE = 1;
-  }
-  else  // load it into software fifo
-  {
-      if (!(fullUp = (FifoTxIdxW == 0xFF)))
-      {
-        memcpy( &TxFifo[FifoTxIdxW].msg, msg->b, msg->b[dlc] + 6);
-  
-        if (++FifoTxIdxW == SW_FIFO )
-            FifoTxIdxW = 0;
-
-        if (FifoTxIdxR == FifoTxIdxW) // check if fifo now full
-            FifoTxIdxW = 0xFF;
-      }
-
-      hiIndex = ( FifoTxIdxW < FifoTxIdxR ? FifoTxIdxW + SW_FIFO : FifoTxIdxW);
-      if ((hiIndex - FifoIdxR) > maxCanTxFifo )
-        maxCanTxFifo = hiIndex - FifoTxIdxR;
-  }
-
-  PIE3bits.TXBnIE = 1;  // Enable transmit buffer interrupt
- 
-  return !fullUp;
-}
-
-
-
-// Called by ISR to handle tx buffer interrupt
-
-void canTxFifo( void )
+BYTE canDataLength(BYTE dlcReg)
 {
-    BYTE* ptr;
+    BYTE len = dlcReg & 0x0F;
 
-    canTransmitFailed = FALSE;   
-    
-    if (!TXB0CONbits.TXREQ)
-    {
-        canTransmitTimeout = 0;
-        
-        if (FifoTxIdxR != FifoTxIdxW)   // If data waiting in software fifo, and buffer ready
-        {
-            ptr = (BYTE*) & TXB0CON;
-            memcpy(ptr, &TxFifo[FifoTxIdxR].msg, TxFifo[FifoTxIdxR].msg[dlc] + 6);
-
-            larbRetryCount = LARB_RETRIES;
-            canTransmitTimeout = 2;	// half second intervals
-
-            TXB0CONbits.TXREQ = 1;    // Initiate transmission
-
-            if (FifoTxIdxW == 0xFF)
-                FifoTxIdxW = FifoTxIdxR; // clear full status
-
-            if (++FifoTxIdxR == SW_FIFO )
-                FifoTxIdxR = 0;
-
-            PIE3bits.TXBnIE = 1;  // enable transmit buffer interrupt
-        }
-        else
-        {
-            TXB0CON = 0;
-            PIE3bits.TXBnIE = 0;
-        }
-    }
-    else
-        PIE3bits.TXBnIE = 1;
- 
-
+    return (len > 8 ? 8 : len);
 }
 
-// Called by high priority ISR at 0.5 sec intervals to check for timeout
+// Queue a frame to send to CAN, without waiting.
+// Returns FALSE, and counts the frame as dropped, if the FIFO is full.
+// Callers that must not drop frames check canbusTxFree() first.
+// The transmit buffers do not work as a FIFO, so one buffer (TXB0) is used,
+// fed from a software FIFO, which keeps frames in order.
 
-void checkCANTimeout( void )
+BOOL canbusSend(CANMsg *msg)
 {
-    if (canTransmitTimeout != 0)
-        if (--canTransmitTimeout ==0)
-        {    
-            canTransmitFailed = TRUE;
-            txTimeoutCount++;
-            TXB0CONbits.TXREQ = 0;  // abort timed out packet
-        }    
-}
+  BYTE len;
+  BOOL queued;
 
+  len = canDataLength(msg->b[dlc]);
 
-//BOOL canSend(CANMsg *msg) {
-//
-//  BYTE i;
-//  BYTE* ptr;
-//  BYTE* tempPtr;
-//  BYTE * pb[buffers];
-//
-//  pb[0] = (BYTE*) & TXB2CON;
-//  pb[1] = (BYTE*) & TXB1CON;
-//  pb[2] = (BYTE*) & TXB0CON;
-//
-//  // Transmit buffers do not work as a FIFO,
-//  for (i = 0; i < buffers; i++) {
-//    ptr = pb[i];
-//    tempPtr = ptr;
-//    /*
-//     * Check to see if this buffer is empty
-//     */
-//    if (!(*ptr & 0x08)) {
-//      msg->b[con] = 0;
-//      memcpy(ptr, (void *) msg->b, msg->b[dlc] + 6);
-//      if (!(*tempPtr & 0x04)) {
-//        *tempPtr |= 0x08;
-//      }
-//      led1timer = 2;
-//      LED1 = LED_ON;
-//      return TRUE;
-//    }
-//  }
-//  return FALSE;
-//}
+  INTCONbits.GIEL = 0;                      // FIFO is shared with the low priority interrupt
+  if (txCount < CAN_TX_FIFO_SIZE)
+  {
+    memcpy((void *) TxFifo[txHead].msg, (void *) msg->b, len + 6);
+    TxFifo[txHead].msg[con] = 0;
+    TxFifo[txHead].msg[dlc] = len;          // data frame, never RTR
 
+    if (++txHead == CAN_TX_FIFO_SIZE)
+      txHead = 0;
+    txCount++;
+    if (txCount > maxCanTxFifo)
+      maxCanTxFifo = txCount;
 
-BOOL canbusSend(CANMsg *msg) {
- 
-  while (!canSend(msg)) {
-    led3timer = 1;
+    txStartNext();
+    queued = TRUE;
+  }
+  else
+  {
+    txDropCount++;
+    queued = FALSE;
+  }
+  INTCONbits.GIEL = 1;
+
+  if (!queued)
+  {
+    led3timer = 20;
     LED3 = LED_OFF;
-    if (COMSTATbits.TXWARN) {
-      led3timer = 20;
-      LED3 = LED_OFF;
-      return FALSE;
+  }
+  return queued;
+}
+
+// Free entries in the transmit FIFO.
+
+BYTE canbusTxFree(void)
+{
+  return CAN_TX_FIFO_SIZE - txCount;
+}
+
+// TRUE while the CAN controller is at error warning level or worse, for
+// example when no other node acknowledges its frames.
+
+BOOL canbusTxErrorWarning(void)
+{
+  return COMSTATbits.TXWARN;
+}
+
+// If the transmit buffer is idle and a frame is waiting, start sending it.
+// Call only from the low priority interrupt, or with it disabled.
+
+static void txStartNext(void)
+{
+  BYTE* ptr;
+
+  if (TXB0CONbits.TXREQ)
+    return;                                 // still sending
+
+  // After an abort request, a frame already on the bus is still sent in
+  // full (data sheet 23.6.2), so the buffer is free only once the abort is
+  // confirmed (TXABT) or the frame has gone (canTxDone).
+  if (txAbortPending)
+  {
+    if (!TXB0CONbits.TXABT)
+      return;
+    txAbortPending = FALSE;
+  }
+
+  canTransmitTimeout = 0;
+
+  if (txCount == 0)
+  {
+    TXB0CON = 0;                            // nothing waiting: clear the buffer's status
+    return;
+  }
+
+  ptr = (BYTE*) & TXB0CON;
+  memcpy(ptr, (void *) TxFifo[txTail].msg, TxFifo[txTail].msg[dlc] + 6);
+  if (++txTail == CAN_TX_FIFO_SIZE)
+    txTail = 0;
+  txCount--;
+
+  canTxTimedOut = FALSE;
+  canTransmitTimeout = CAN_TX_TIMEOUT_TICKS;
+  TXB0CONbits.TXREQ = 1;                    // Initiate transmission
+}
+
+// Called by the low priority interrupt when the transmit buffer has sent its frame.
+
+void canTxDone(void)
+{
+  txAbortPending = FALSE;
+  txStartNext();
+}
+
+// Called by the high priority interrupt every half second.
+
+void checkCANTimeout(void)
+{
+  if (canTransmitTimeout != 0)
+    if (--canTransmitTimeout == 0)
+      canTxTimedOut = TRUE;
+}
+
+// Called from the main loop on every pass.
+// Abandons a frame the bus has not taken within the time-out (0.5 to 1 s),
+// and starts the next queued frame whenever the transmitter is idle. An
+// abandoned frame raises no interrupt, so without this the FIFO would wait.
+
+void canbusService(void)
+{
+  INTCONbits.GIEL = 0;
+  if (canTxTimedOut)
+  {
+    canTxTimedOut = FALSE;
+    if (TXB0CONbits.TXREQ)
+    {
+      TXB0CONbits.TXREQ = 0;                // request abort
+      txAbortPending = TRUE;
+      txTimeoutCount++;
     }
   }
-  return TRUE;
+  txStartNext();
+  INTCONbits.GIEL = 1;
 }
+
+// Called by the low priority interrupt on a CAN error interrupt.
+// That is raised when the controller's error state changes or the receive
+// FIFO overflows (PIC18F2585 data sheet, 23.15.6), not by lost arbitration.
+// The controller retries a frame by itself, and canbusService abandons a
+// frame the bus will not take, so here the event is only counted.
+
+void canTxError(void)
+{
+  txErrCount++;
+}
+
 
 // This firmware version does not do self enumeration
 // The RTR packet and self enumeration replies (canid but no payload) should not be
@@ -330,6 +341,7 @@ BOOL canbusRecv(CANMsg *msg)
 
     CANMsg *ptr;
     BOOL   msgFound;
+    BYTE   len;
   
     // First check for any messages in the software fifo, which the ISR will have filled if there has been a high watermark interrupt
 
@@ -364,9 +376,11 @@ BOOL canbusRecv(CANMsg *msg)
 //              COMSTATbits.RXBnOVFL = 0;
 //            }
 
-            if ( msgFound = ( !(ptr->b[dlc] & 0x40 ) && (ptr->b[dlc] & 0x0F) ) )   // Check not RTR and not zero payload
+            len = canDataLength(ptr->b[dlc]);
+            if ( msgFound = ( !(ptr->b[dlc] & 0x40 ) && len ) )   // Check not RTR and not zero payload
             {
-                memcpy(msg->b, (void*) ptr, ptr->b[dlc] + 6);
+                memcpy(msg->b, (void*) ptr, len + 6);
+                msg->b[dlc] = len;
             }
 
             // Record and Clear any previous invalid message bit flag.
@@ -391,7 +405,9 @@ BOOL canbusRecv(CANMsg *msg)
 void canbusFifo(void)
 {
   CANMsg *ptr;
-  BYTE  hiIndex;
+  BYTE  waiting;
+  BYTE  len;
+  BYTE  *entry;
 
 
   while (COMSTATbits.FIFOEMPTY)
@@ -406,12 +422,15 @@ void canbusFifo(void)
       COMSTATbits.RXBnOVFL = 0;
     }
     
-    if (!(ptr->b[dlc] & 0x40 ) && (ptr->b[dlc] & 0x0F))       // Check not RTR and not zero payload               
+    len = canDataLength(ptr->b[dlc]);
+    if (!(ptr->b[dlc] & 0x40 ) && len)       // Check not RTR and not zero payload
     {
         if (FifoIdxW >= SW_FIFO)  
-          memcpy((void*) &Fifo1[FifoIdxW - SW_FIFO].msg, (void*) ptr, ptr->b[dlc] + 6);
+          entry = Fifo1[FifoIdxW - SW_FIFO].msg;
         else
-          memcpy((void*) &Fifo0[FifoIdxW].msg, (void*) ptr, ptr->b[dlc] + 6);
+          entry = Fifo0[FifoIdxW].msg;
+        memcpy((void*) entry, (void*) ptr, len + 6);
+        entry[dlc] = len;
         
         FifoIdxW++;
         if (FifoIdxW >= SW_FIFO_MAX)
@@ -443,41 +462,11 @@ void canbusFifo(void)
     led1timer = 2;
     LED1 = LED_ON;
 
-    hiIndex = ( FifoIdxW < FifoIdxR ? FifoIdxW + SW_FIFO : FifoIdxW);
-    if ((hiIndex - FifoIdxR) > maxCANFifo )
-        maxCANFifo = hiIndex - FifoIdxR;
+    waiting = ( FifoIdxW < FifoIdxR ? FifoIdxW + SW_FIFO_MAX : FifoIdxW) - FifoIdxR;
+    if (waiting > maxCANFifo )
+        maxCANFifo = waiting;
 
   }  // While hardware FIFO not empty
-}
-
-
-// Process transmit error interrupt
-
-void canTxError( void )
-{
-    if (TXB0CONbits.TXLARB) {  // lost arbitration
-        if (larbRetryCount == 0) {	// already tried higher priority
-            canTransmitFailed = TRUE;
-            canTransmitTimeout = 0;
-
-            TXB0CONbits.TXREQ = 0;
-            larbCount++;
-        }
-        else if ( --larbRetryCount == 0) {	// Allow tries at lower level priority first
-            TXB0CONbits.TXREQ = 0;
-            TXB0SIDH &= 0b00111111; 		// change to high priority
-            TXB0CONbits.TXREQ = 1;			// try again
-        }
-    }
-    if (TXB0CONbits.TXERR) {	// bus error
-      canTransmitFailed = TRUE;
-      canTransmitTimeout = 0;
-      TXB1CONbits.TXREQ = 0;
-      txErrCount++;
-    }
-    
-    if (canTransmitFailed)
-        canTxFifo();
 }
 
 
